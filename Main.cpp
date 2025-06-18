@@ -1,15 +1,9 @@
-
-/*
-
-TO DO:
-
+/* TO DO:
 ** Add single sided joints (apart from full intersections)
 ** Make "lef" and "right" of line sensors count on two sensors instead of just one (left = s1 + s2, not just s1)
 ** Use Gadiel's code for the mechano wheels (?)
 **Test lol
-
 */
-
 
 #include <Wire.h>
 #include <VL6180X.h>
@@ -162,7 +156,6 @@ AvoidanceState avoidance_state = AVOIDANCE_NONE;
 std::vector<String> full_path;
 size_t current_path_index = 0;
 bool processing_targets = true;
-TrackNode* node_tracking;
 
 // Box handling variables
 int current_face = 0;  // Current active face (0-3)
@@ -202,6 +195,46 @@ bool isApproachingTargetBox();
 void configureTOF(VL6180X& sensor, uint8_t address);
 int getCurrentFaceTOFDistance();
 void activateElectromagnet(bool on);
+
+// ==================== TRACKNODE CLASS DEFINITION ====================
+class TrackNode {
+public:
+    String current_node;
+    int direction;
+    
+    TrackNode(std::map<String, std::vector<std::tuple<String, int, int>>> graph, 
+              String start_node, int start_direction) {
+        this->graph = graph;
+        this->current_node = start_node;
+        this->direction = start_direction;
+    }
+    
+    std::pair<int, int> get_turn_to(String next_node) {
+        for (auto& neighbour : graph[current_node]) {
+            if (std::get<0>(neighbour) == next_node) {
+                int relative_direction = (std::get<2>(neighbour) - direction) % 4;
+                return {relative_direction, std::get<2>(neighbour)};
+            }
+        }
+        Serial.printf("No path found from %s to %s\n", current_node.c_str(), next_node.c_str());
+        return {0, 0};
+    }
+    
+    int advance(String next_node) {
+        auto turn_info = get_turn_to(next_node);
+        int relative_direction = turn_info.first;
+        int absolute_direction = turn_info.second;
+        current_node = next_node;
+        direction = absolute_direction;
+        return relative_direction;
+    }
+
+private:
+    std::map<String, std::vector<std::tuple<String, int, int>>> graph;
+};
+
+//Declare the node_tracking pointer after the class definition
+TrackNode* node_tracking;
 
 // ==================== MAIN ARDUINO FUNCTIONS ====================
 void setup() {
@@ -803,40 +836,3 @@ void printMissionStatus() {
     Serial.printf("\nCurrent node: %s\n", node_tracking->current_node.c_str());
     Serial.println("=====================");
 }
-
-// ==================== TRACKNODE CLASS IMPLEMENTATION ====================
-class TrackNode {
-public:
-    String current_node;
-    int direction;
-    
-    TrackNode(std::map<String, std::vector<std::tuple<String, int, int>>> graph, 
-              String start_node, int start_direction) {
-        this->graph = graph;
-        this->current_node = start_node;
-        this->direction = start_direction;
-    }
-    
-    std::pair<int, int> get_turn_to(String next_node) {
-        for (auto& neighbour : graph[current_node]) {
-            if (std::get<0>(neighbour) == next_node) {
-                int relative_direction = (std::get<2>(neighbour) - direction) % 4;
-                return {relative_direction, std::get<2>(neighbour)};
-            }
-        }
-        Serial.printf("No path found from %s to %s\n", current_node.c_str(), next_node.c_str());
-        return {0, 0};
-    }
-    
-    int advance(String next_node) {
-        auto turn_info = get_turn_to(next_node);
-        int relative_direction = turn_info.first;
-        int absolute_direction = turn_info.second;
-        current_node = next_node;
-        direction = absolute_direction;
-        return relative_direction;
-    }
-
-private:
-    std::map<String, std::vector<std::tuple<String, int, int>>> graph;
-};
