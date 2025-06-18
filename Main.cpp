@@ -115,6 +115,26 @@ std::map<std::pair<String, String>, int> ADJUSTED_TURNS = {
     {{"4B", "3B"}, 54}
 };
 
+
+// ==================== FUNCTION PROTOTYPES ====================
+
+// Navigation functions
+std::vector<String> dijkstra(String start, String goal);
+void followLine(bool line_left, bool line_center, bool line_right);
+float pid_calc(float error);
+void avoidObstacle();
+void setMotorSpeeds(float left, float right);
+
+// Mission control functions
+void planMission();
+void printMissionStatus();
+
+// Hardware control functions
+void configureTOF(VL6180X& sensor, uint8_t address);
+int getCurrentFaceTOFDistance();
+void activateElectromagnet(bool on);
+
+
 // ==================== NODE TRACKING CLASS ====================
 class TrackNode {
 public:
@@ -513,33 +533,6 @@ void activateElectromagnet(bool on) {
     }
 }
 
-void planMission() {
-    std::vector<String> mission_path;
-    String current = node_tracking->current_node;
-    
-    if (processing_targets) {
-        // Plan path to next target node
-        auto path_segment = dijkstra(current, TARGET_NODES[boxes_collected]);
-        mission_path.insert(mission_path.end(), path_segment.begin(), path_segment.end());
-        Serial.printf("Planning path to target node %s\n", TARGET_NODES[boxes_collected].c_str());
-    } 
-    else {
-        // Plan path to next dropoff node
-        auto path_segment = dijkstra(current, DROPOFF_NODES[boxes_delivered]);
-        mission_path.insert(mission_path.end(), path_segment.begin(), path_segment.end());
-        Serial.printf("Planning path to dropoff node %s\n", DROPOFF_NODES[boxes_delivered].c_str());
-    }
-    
-    full_path = mission_path;
-    current_path_index = 0;
-    
-    Serial.print("New path: ");
-    for (const auto& node : full_path) {
-        Serial.print(node.c_str()); Serial.print(" ");
-    }
-    Serial.println();
-}
-
 std::vector<String> dijkstra(String start, String goal) {
     // Priority queue: (total_distance, current_node)
     std::priority_queue<std::pair<int, String>, 
@@ -585,6 +578,33 @@ std::vector<String> dijkstra(String start, String goal) {
     path.insert(path.begin(), start);
     
     return path;
+}
+
+void planMission() {
+    std::vector<String> mission_path;
+    String current = node_tracking->current_node;
+    
+    if (processing_targets) {
+        // Plan path to next target node
+        auto path_segment = dijkstra(current, TARGET_NODES[boxes_collected]);
+        mission_path.insert(mission_path.end(), path_segment.begin(), path_segment.end());
+        Serial.printf("Planning path to target node %s\n", TARGET_NODES[boxes_collected].c_str());
+    } 
+    else {
+        // Plan path to next dropoff node
+        auto path_segment = dijkstra(current, DROPOFF_NODES[boxes_delivered]);
+        mission_path.insert(mission_path.end(), path_segment.begin(), path_segment.end());
+        Serial.printf("Planning path to dropoff node %s\n", DROPOFF_NODES[boxes_delivered].c_str());
+    }
+    
+    full_path = mission_path;
+    current_path_index = 0;
+    
+    Serial.print("New path: ");
+    for (const auto& node : full_path) {
+        Serial.print(node.c_str()); Serial.print(" ");
+    }
+    Serial.println();
 }
 
 void followLine(bool line_left, bool line_center, bool line_right) {
