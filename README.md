@@ -57,14 +57,10 @@ An ESP32-based autonomous robot capable of navigating a line-mapped environment,
 
 ## Customization Points
 
-- **START_NODE, TARGET_NODES, DROPOFF_NODES** – Update based on your map layout  
+- **START_NODE, TARGET_NODES, DROPOFF_NODES** – Update based actual map layout
+- **MAP_DISTANCES** - Adjust the map nodes to real size of map
 - **BOX_PICKUP_TIME** – Set duration for electromagnet activation  
 - **PID Constants (Kp, Ki, Kd)** – Tune for optimal line-following performance  
-- **ToF Sensor Thresholds** – Adjust for your environment's obstacle distances  
-- **Pin Assignments** – Match pin mappings to your specific hardware wiring
+- **ToF Sensor Thresholds** – Adjust based on real distances  
+- **Pin Assignments** – Match pin mappings to multiplexers, etc...
 
----
-
-## 📄 License
-
-This project is open-source and freely available for academic and hobbyist use. For commercial applications, please contact the authors.
