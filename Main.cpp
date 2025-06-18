@@ -5,63 +5,73 @@
 #include <queue>
 #include <map>
 
-// TCRT5000 Sensor Pins
-const int S1 = 13, S2 = 12, S3 = 14, S4 = 27, S5 = 26;
-const int CLP = 25;    // Limit switch
+// ==================== HARDWARE CONFIGURATION ====================
+// Line Sensor Pins
+const int S1 = 13;  // Far left sensor
+const int S2 = 12;  // Middle left sensor
+const int S3 = 14;  // Center sensor
+const int S4 = 27;  // Middle right sensor
+const int S5 = 26;  // Far right sensor
+
+// Limit Switch and Proximity Sensor
+const int CLP = 25;    // Limit switch (with pullup)
 const int NEAR = 33;   // Proximity sensor
 
-// Motor control pins
+// Motor Control Pins
 const int LEFT_MOTOR_PWM = 32;
 const int LEFT_MOTOR_DIR = 23;
 const int RIGHT_MOTOR_PWM = 18;
 const int RIGHT_MOTOR_DIR = 19;
 
-// VL6180X Sensor
-VL6180X vl6180;
+// Electromagnet Control Pins (one per face)
+const int EMAG1 = 15;  // Face 1 electromagnet
+const int EMAG2 = 2;   // Face 2 electromagnet
+const int EMAG3 = 4;   // Face 3 electromagnet
+const int EMAG4 = 5;   // Face 4 electromagnet
 
-// Navigation constants
-const float BASE_SPEED = 0.6;  // Base speed (0 to 1)
-const float KP = 0.15;         // Proportional constant for line following
-const unsigned long NODE_DETECT_DELAY = 500; // ms to wait at node
+// Mechano Wheel Control
+const int MECHANO_ENGAGE = 17;  // HIGH = engaged, LOW = disengaged
 
-// PID constants
-const float Kp = 0.75;
-const float Ki = 0.001;
-const float Kd = 0.08;
+// TOF Sensor I2C Addresses
+const uint8_t TOF1_ADDRESS = 0x30;  // Face 1 TOF
+const uint8_t TOF2_ADDRESS = 0x31;  // Face 2 TOF
+const uint8_t TOF3_ADDRESS = 0x32;  // Face 3 TOF
+const uint8_t TOF4_ADDRESS = 0x33;  // Face 4 TOF
+
+// TOF Sensor Objects
+VL6180X tof1;
+VL6180X tof2;
+VL6180X tof3;
+VL6180X tof4;
+
+// ==================== NAVIGATION CONSTANTS ====================
+const float BASE_SPEED = 0.6;       // Base speed (0 to 1)
+const float KP = 0.15;              // Proportional constant for line following
+const unsigned long NODE_DETECT_DELAY = 500;  // ms to wait at node
+const unsigned long BOX_PICKUP_TIME = 2000;   // Time to hold electromagnet on (ms)
+
+// PID Controller Constants
+const float Kp = 0.75;  // Proportional gain
+const float Ki = 0.001; // Integral gain
+const float Kd = 0.08;  // Derivative gain
 float integral = 0;
 float prev_err = 0;
 
-// Parameters for movement
-const int TURN_90 = 44;        // Step count for a 90° turn
-const int TURN_180 = 88;        // Step count for a 180° turn
-const int TURN_INTERSECTION = 10; // Steps to exit a intersection
-const float MAX_SPEED = 6.28;   // Max wheel velocity (2π radians)
-const float TURN_SPEED = 0.25 * MAX_SPEED; // Angular velocity while turning
-const float LINE_FOLLOW_SPEED = 0.3 * MAX_SPEED; // Angular velocity while following a line
+// Movement Parameters
+const int TURN_90 = 44;        // Step count for 90° turn
+const int TURN_180 = 88;       // Step count for 180° turn
+const int TURN_INTERSECTION = 10; // Steps to exit intersection
+const float MAX_SPEED = 6.28;  // Max wheel velocity (radians/sec)
+const float TURN_SPEED = 0.25 * MAX_SPEED;  // Turning speed
+const float LINE_FOLLOW_SPEED = 0.3 * MAX_SPEED; // Line following speed
 
-// Override turn distances for tricky intersections/sensor misalignment
-std::map<std::pair<String, String>, int> ADJUSTED_TURNS = {
-    {{"4B", "5A"}, 39},
-    {{"2B", "3B"}, 49},
-    {{"5A", "5B"}, 50},
-    {{"6A", "6B"}, 49},
-    {{"6D", "7D"}, 49},
-    {{"6E", "5A"}, 44},
-    {{"4A", "4B"}, 44},
-    {{"4B", "3B"}, 54}
-};
+// ==================== MISSION PARAMETERS ====================
+const String START_NODE = "7A";  // Starting position on map
+const std::vector<String> TARGET_NODES = {"3B", "4C", "2F", "1D"};  // Box pickup locations
+const std::vector<String> DROPOFF_NODES = {"6A", "6D", "6F", "7D"}; // Box delivery locations
 
-// Robot state machine states
-enum State {
-    FOLLOW_LINE,
-    TURN_PREP,
-    IN_TURN,
-    SEARCH,
-    INTERSECTION,
-    COMPLETED
-};
-
-// Node graph: all nodes have neighbouring nodes with (Node name, Distance, Direction)
+// ==================== NODE GRAPH DEFINITION ====================
+// Graph structure: Node -> [(Neighbor, Distance, Direction), ...]
 // Directions: 0 = North, 1 = East, 2 = South, 3 = West
 std::map<String, std::vector<std::tuple<String, int, int>>> graph = {
     {"1A", {{"2C", 21, 0}}}, 
@@ -93,13 +103,26 @@ std::map<String, std::vector<std::tuple<String, int, int>>> graph = {
     {"7D", {{"6D", 12, 2}}}
 };
 
-// Keeps track of the EPUCK's current position as a node from the graph
+// Special turn adjustments for specific intersections
+std::map<std::pair<String, String>, int> ADJUSTED_TURNS = {
+    {{"4B", "5A"}, 39},
+    {{"2B", "3B"}, 49},
+    {{"5A", "5B"}, 50},
+    {{"6A", "6B"}, 49},
+    {{"6D", "7D"}, 49},
+    {{"6E", "5A"}, 44},
+    {{"4A", "4B"}, 44},
+    {{"4B", "3B"}, 54}
+};
+
+// ==================== NODE TRACKING CLASS ====================
 class TrackNode {
 public:
     String current_node;
     int direction;
     
-    TrackNode(std::map<String, std::vector<std::tuple<String, int, int>>> graph, String start_node, int start_direction) {
+    TrackNode(std::map<String, std::vector<std::tuple<String, int, int>>> graph, 
+              String start_node, int start_direction) {
         this->graph = graph;
         this->current_node = start_node;
         this->direction = start_direction;
@@ -109,19 +132,17 @@ public:
         for (auto& neighbour : graph[current_node]) {
             if (std::get<0>(neighbour) == next_node) {
                 int relative_direction = (std::get<2>(neighbour) - direction) % 4;
-                Serial.printf("Current node: %s, Next planned node: %s, direction: %d\n", current_node.c_str(), next_node.c_str(), direction);
                 return {relative_direction, std::get<2>(neighbour)};
             }
         }
         Serial.printf("No path found from %s to %s\n", current_node.c_str(), next_node.c_str());
-        return {0, 0}; // Default return, should handle error properly
+        return {0, 0};
     }
     
     int advance(String next_node) {
         auto turn_info = get_turn_to(next_node);
         int relative_direction = turn_info.first;
         int absolute_direction = turn_info.second;
-        Serial.printf("Moving from %s to %s. New direction: %d\n", current_node.c_str(), next_node.c_str(), absolute_direction);
         current_node = next_node;
         direction = absolute_direction;
         return relative_direction;
@@ -131,26 +152,50 @@ private:
     std::map<String, std::vector<std::tuple<String, int, int>>> graph;
 };
 
-// Global variables
+// ==================== STATE MACHINE DEFINITION ====================
+enum State { 
+    FOLLOW_LINE,    // Following line normally
+    TURN_PREP,      // Preparing for a turn
+    IN_TURN,        // Executing a turn
+    SEARCH,         // Searching for lost line
+    INTERSECTION,   // Handling intersection
+    APPROACH_BOX,   // Approaching box at target node
+    COLLECT_BOX,    // Collecting box with electromagnet
+    ROTATE_TO_NEXT_FACE, // Rotating to next face for collection
+    ROTATE_TO_NEXT_LOADED_FACE, // Rotating to next loaded face for delivery
+    DROP_BOX,       // Dropping box at delivery node
+    COMPLETED       // Mission complete
+};
+
+// ==================== GLOBAL VARIABLES ====================
 State state = FOLLOW_LINE;
+std::vector<String> full_path;
+size_t current_path_index = 0;
+bool processing_targets = true;
+TrackNode* node_tracking;
+
+// Box handling variables
+int current_face = 0;  // Current active face (0-3)
+int boxes_collected = 0;
+int boxes_delivered = 0;
+bool boxes_loaded[4] = {false, false, false, false};
+unsigned long action_start_time = 0;
+
+// Navigation variables
+String next_node = "";
 int turn_counter = 0;
 int turn_direction = 0;
 int turn_steps_target = 0;
-String next_node = "";
 bool turn_lost_line = false;
 int intersection_cooldown = 0;
 const int intersection_cooldown_steps = 32;
 bool past_intersection = false;
-String START_NODE = "7A";  // Start node/initial position
-String GOAL_NODE = "3B";   // Robot's goal node
-std::vector<String> PATH;
-int path_index = 0;
-TrackNode* node_tracking;
 
+// ==================== MAIN ARDUINO FUNCTIONS ====================
 void setup() {
     Serial.begin(115200);
     
-    // Initialize TCRT5000 pins
+    // Initialize sensor pins
     pinMode(S1, INPUT);
     pinMode(S2, INPUT);
     pinMode(S3, INPUT);
@@ -165,26 +210,40 @@ void setup() {
     pinMode(RIGHT_MOTOR_PWM, OUTPUT);
     pinMode(RIGHT_MOTOR_DIR, OUTPUT);
     
-    // Initialize I2C for VL6180X
-    Wire.begin(21, 22);  // SDA=GPIO21, SCL=GPIO22
+    // Initialize electromagnets (active HIGH)
+    pinMode(EMAG1, OUTPUT);
+    pinMode(EMAG2, OUTPUT);
+    pinMode(EMAG3, OUTPUT);
+    pinMode(EMAG4, OUTPUT);
+    digitalWrite(EMAG1, LOW);
+    digitalWrite(EMAG2, LOW);
+    digitalWrite(EMAG3, LOW);
+    digitalWrite(EMAG4, LOW);
     
-    // Wait for sensor to boot up
+    // Initialize mechano wheels
+    pinMode(MECHANO_ENGAGE, OUTPUT);
+    digitalWrite(MECHANO_ENGAGE, HIGH);  // Engage mechano wheels
+    
+    // Initialize I2C for TOF sensors
+    Wire.begin(21, 22);
     delay(100);
     
-    // Initialize VL6180X
-    vl6180.init();
-    vl6180.configureDefault();
-    vl6180.setTimeout(500);
+    // Configure TOF sensors with unique addresses
+    configureTOF(tof1, TOF1_ADDRESS);
+    configureTOF(tof2, TOF2_ADDRESS);
+    configureTOF(tof3, TOF3_ADDRESS);
+    configureTOF(tof4, TOF4_ADDRESS);
     
-    // Initialize path (in a real implementation, you'd get this from path planning)
-    PATH = {"7A", "6A", "6B", "6C", "6D", "6E", "5A", "4B", "3B"};
-    node_tracking = new TrackNode(graph, PATH[0], 2); // Start facing South
+    // Initialize mission tracking
+    node_tracking = new TrackNode(graph, START_NODE, 2);  // Start facing South
+    planMission();
     
-    Serial.println("\nAll systems ready!");
+    Serial.println("\n=== Robot Initialization Complete ===");
+    printMissionStatus();
 }
 
 void loop() {
-    // Read line sensors (1 = on line, 0 = off line)
+    // ==================== SENSOR READING ====================
     bool s1 = !digitalRead(S1);
     bool s2 = !digitalRead(S2);
     bool s3 = !digitalRead(S3);
@@ -196,55 +255,175 @@ void loop() {
     bool line_right = s5;
     bool intersection_now = (s1 + s3 + s5) > 1;
     
-    // Update intersection marker to prevent re-triggering
+    // Read current face's TOF sensor
+    int tof_distance = getCurrentFaceTOFDistance();
+    
+    // Update intersection marker
     if (!intersection_now) {
         past_intersection = true;
     }
     
-    // State machine implementation
+    // ==================== STATE MACHINE ====================
     switch(state) {
+        // ---------- Line Following State ----------
         case FOLLOW_LINE:
             followLine(line_left, line_center, line_right);
             
-            // Intersection detection and path deciding
-            if (intersection_cooldown == 0 && intersection_now && past_intersection && path_index + 1 < PATH.size()) {
-                next_node = PATH[path_index + 1];
-                auto turn_info = node_tracking->get_turn_to(next_node);
-                turn_direction = turn_info.first;
-                past_intersection = false;
-                if (turn_direction != 0) {
-                    state = TURN_PREP;
+            if (intersection_cooldown == 0 && intersection_now && past_intersection) {
+                if (current_path_index + 1 < full_path.size()) {
+                    next_node = full_path[current_path_index + 1];
+                    auto turn_info = node_tracking->get_turn_to(next_node);
+                    turn_direction = turn_info.first;
+                    past_intersection = false;
+                    
+                    // Check if we're arriving at a target or dropoff node
+                    if (processing_targets && next_node == TARGET_NODES[boxes_collected]) {
+                        state = APPROACH_BOX;
+                        action_start_time = millis();
+                        Serial.println("Approaching target box...");
+                    } 
+                    else if (!processing_targets && next_node == DROPOFF_NODES[boxes_delivered]) {
+                        state = DROP_BOX;
+                        action_start_time = millis();
+                        Serial.println("Arrived at dropoff location...");
+                    } 
+                    else {
+                        state = (turn_direction != 0) ? TURN_PREP : INTERSECTION;
+                    }
                     turn_counter = 0;
                     turn_lost_line = false;
-                } else {
-                    state = INTERSECTION;
-                    turn_counter = 0;
                 }
             }
             break;
             
+        // ---------- Box Approach State ----------
+        case APPROACH_BOX:
+            // Slowly approach box using TOF sensor
+            if (tof_distance > 50 && tof_distance < 250) {  // 50-250mm range
+                setMotorSpeeds(0.2 * MAX_SPEED, 0.2 * MAX_SPEED);
+            } 
+            else if (tof_distance <= 50) {
+                setMotorSpeeds(0, 0);
+                state = COLLECT_BOX;
+                action_start_time = millis();
+                Serial.println("Box in position, activating electromagnet...");
+            }
+            else {
+                // Too far or no reading
+                setMotorSpeeds(0, 0);
+                Serial.println("Box not detected! Attempting recovery...");
+                state = SEARCH;
+            }
+            break;
+            
+        // ---------- Box Collection State ----------
+        case COLLECT_BOX:
+            // Activate current face's electromagnet
+            activateElectromagnet(true);
+            
+            if (millis() - action_start_time > BOX_PICKUP_TIME) {
+                boxes_loaded[current_face] = true;
+                boxes_collected++;
+                activateElectromagnet(false);
+                printMissionStatus();
+                
+                if (boxes_collected < 4) {
+                    // Rotate to next face for next collection
+                    state = ROTATE_TO_NEXT_FACE;
+                    action_start_time = millis();
+                    Serial.println("Rotating to next face...");
+                } 
+                else {
+                    // All boxes collected, proceed to dropoffs
+                    processing_targets = false;
+                    current_path_index++;
+                    planMission();
+                    state = INTERSECTION;
+                    Serial.println("All boxes collected! Moving to dropoff locations...");
+                }
+            }
+            break;
+            
+        // ---------- Box Dropoff State ----------
+        case DROP_BOX:
+            // Deactivate electromagnet to release box
+            activateElectromagnet(false);
+            
+            if (millis() - action_start_time > 500) {  // Brief pause for drop
+                boxes_loaded[current_face] = false;
+                boxes_delivered++;
+                printMissionStatus();
+                
+                if (boxes_delivered < 4) {
+                    // Rotate to next loaded face
+                    state = ROTATE_TO_NEXT_LOADED_FACE;
+                    action_start_time = millis();
+                    Serial.println("Rotating to next loaded face...");
+                } 
+                else {
+                    // All boxes delivered
+                    state = COMPLETED;
+                    Serial.println("All boxes delivered!");
+                }
+            }
+            break;
+            
+        // ---------- Face Rotation States ----------
+        case ROTATE_TO_NEXT_FACE:
+            // Rotate 90 degrees to next face (for collection)
+            current_face = (current_face + 1) % 4;
+            setMotorSpeeds(TURN_SPEED, -TURN_SPEED);
+            
+            if (millis() - action_start_time > TURN_90) {
+                setMotorSpeeds(0, 0);
+                state = FOLLOW_LINE;
+                Serial.printf("Now using face %d for next operation\n", current_face + 1);
+            }
+            break;
+            
+        case ROTATE_TO_NEXT_LOADED_FACE:
+            // Find next face that has a box
+            for (int i = 1; i <= 4; i++) {
+                int next_face = (current_face + i) % 4;
+                if (boxes_loaded[next_face]) {
+                    current_face = next_face;
+                    break;
+                }
+            }
+            setMotorSpeeds(TURN_SPEED, -TURN_SPEED);
+            
+            if (millis() - action_start_time > TURN_90) {
+                setMotorSpeeds(0, 0);
+                state = FOLLOW_LINE;
+                Serial.printf("Now using face %d for delivery\n", current_face + 1);
+            }
+            break;
+            
+        // ---------- Navigation States ----------
         case TURN_PREP:
             setMotorSpeeds(LINE_FOLLOW_SPEED, LINE_FOLLOW_SPEED);
-            turn_counter++;
-            if (turn_counter >= 4) {
+            if (++turn_counter >= 4) {
                 state = IN_TURN;
                 turn_counter = 0;
-                // Use turn correction if required
+                // Use adjusted turn if specified, otherwise default
                 auto key = std::make_pair(node_tracking->current_node, next_node);
                 if (ADJUSTED_TURNS.find(key) != ADJUSTED_TURNS.end()) {
                     turn_steps_target = ADJUSTED_TURNS[key];
-                } else {
+                } 
+                else {
                     turn_steps_target = (turn_direction == 1 || turn_direction == 3) ? TURN_90 : TURN_180;
                 }
             }
             break;
             
         case IN_TURN:
-            if (turn_direction == 1) {
+            if (turn_direction == 1) {  // Right turn
                 setMotorSpeeds(TURN_SPEED, -TURN_SPEED);
-            } else if (turn_direction == 3) {
+            } 
+            else if (turn_direction == 3) {  // Left turn
                 setMotorSpeeds(-TURN_SPEED, TURN_SPEED);
-            } else if (turn_direction == 2) {
+            } 
+            else if (turn_direction == 2) {  // About face
                 setMotorSpeeds(TURN_SPEED, -TURN_SPEED);
             }
             
@@ -272,38 +451,140 @@ void loop() {
             turn_counter++;
             if (turn_counter >= TURN_INTERSECTION && !intersection_now) {
                 node_tracking->advance(next_node);
-                path_index++;
+                current_path_index++;
                 intersection_cooldown = intersection_cooldown_steps;
                 past_intersection = false;
-                state = (path_index == PATH.size() - 1) ? COMPLETED : FOLLOW_LINE;
+                state = FOLLOW_LINE;
                 turn_counter = 0;
             }
             break;
             
+        // ---------- Mission Complete State ----------
         case COMPLETED:
             setMotorSpeeds(0, 0);
-            while(1) { delay(1000); } // Stop forever
+            digitalWrite(MECHANO_ENGAGE, LOW);  // Disengage mechano wheels
+            while(1) { 
+                Serial.println("=== MISSION COMPLETE ===");
+                Serial.println("All boxes delivered successfully!");
+                delay(1000); 
+            }
             break;
     }
     
+    // ==================== MAINTENANCE UPDATES ====================
     if (intersection_cooldown > 0) {
         intersection_cooldown--;
     }
     
-    // Check for obstacles
-    float distance = vl6180.readRangeSingleMillimeters();
-    if (!vl6180.timeoutOccurred() && distance < 150) { // 150mm = 15cm
-        avoidObstacle();
+    // Obstacle avoidance (except during box operations)
+    if (state != APPROACH_BOX && state != COLLECT_BOX && state != DROP_BOX) {
+        if (tof_distance > 0 && tof_distance < 150) {
+            avoidObstacle();
+        }
     }
     
-    delay(10); // Small delay for stability
+    delay(10);  // Small delay for stability
 }
 
-float pid_calc(float error) {
-    integral += error;
-    float derivative = error - prev_err;
-    prev_err = error;
-    return Kp * error + Ki * integral + Kd * derivative;
+// ==================== HELPER FUNCTIONS ====================
+void configureTOF(VL6180X& sensor, uint8_t address) {
+    sensor.init();
+    sensor.configureDefault();
+    sensor.setAddress(address);
+    sensor.setTimeout(500);
+}
+
+int getCurrentFaceTOFDistance() {
+    switch(current_face) {
+        case 0: return tof1.readRangeSingleMillimeters();
+        case 1: return tof2.readRangeSingleMillimeters();
+        case 2: return tof3.readRangeSingleMillimeters();
+        case 3: return tof4.readRangeSingleMillimeters();
+        default: return -1;
+    }
+}
+
+void activateElectromagnet(bool on) {
+    switch(current_face) {
+        case 0: digitalWrite(EMAG1, on ? HIGH : LOW); break;
+        case 1: digitalWrite(EMAG2, on ? HIGH : LOW); break;
+        case 2: digitalWrite(EMAG3, on ? HIGH : LOW); break;
+        case 3: digitalWrite(EMAG4, on ? HIGH : LOW); break;
+    }
+}
+
+void planMission() {
+    std::vector<String> mission_path;
+    String current = node_tracking->current_node;
+    
+    if (processing_targets) {
+        // Plan path to next target node
+        auto path_segment = dijkstra(current, TARGET_NODES[boxes_collected]);
+        mission_path.insert(mission_path.end(), path_segment.begin(), path_segment.end());
+        Serial.printf("Planning path to target node %s\n", TARGET_NODES[boxes_collected].c_str());
+    } 
+    else {
+        // Plan path to next dropoff node
+        auto path_segment = dijkstra(current, DROPOFF_NODES[boxes_delivered]);
+        mission_path.insert(mission_path.end(), path_segment.begin(), path_segment.end());
+        Serial.printf("Planning path to dropoff node %s\n", DROPOFF_NODES[boxes_delivered].c_str());
+    }
+    
+    full_path = mission_path;
+    current_path_index = 0;
+    
+    Serial.print("New path: ");
+    for (const auto& node : full_path) {
+        Serial.print(node.c_str()); Serial.print(" ");
+    }
+    Serial.println();
+}
+
+std::vector<String> dijkstra(String start, String goal) {
+    // Priority queue: (total_distance, current_node)
+    std::priority_queue<std::pair<int, String>, 
+                       std::vector<std::pair<int, String>>, 
+                       std::greater<std::pair<int, String>>> pq;
+    std::map<String, bool> visited;
+    std::map<String, String> previous;
+    std::map<String, int> distances;
+    
+    // Initialize distances
+    for (auto& node : graph) {
+        distances[node.first] = INT_MAX;
+    }
+    distances[start] = 0;
+    pq.push({0, start});
+    
+    while (!pq.empty()) {
+        String current = pq.top().second;
+        pq.pop();
+        
+        if (current == goal) break;
+        if (visited[current]) continue;
+        
+        visited[current] = true;
+        
+        for (auto& neighbor : graph[current]) {
+            String next = std::get<0>(neighbor);
+            int weight = std::get<1>(neighbor);
+            
+            if (distances[next] > distances[current] + weight) {
+                distances[next] = distances[current] + weight;
+                previous[next] = current;
+                pq.push({distances[next], next});
+            }
+        }
+    }
+    
+    // Reconstruct path
+    std::vector<String> path;
+    for (String at = goal; at != start; at = previous[at]) {
+        path.insert(path.begin(), at);
+    }
+    path.insert(path.begin(), start);
+    
+    return path;
 }
 
 void followLine(bool line_left, bool line_center, bool line_right) {
@@ -311,20 +592,32 @@ void followLine(bool line_left, bool line_center, bool line_right) {
     
     if (line_left && !line_center && !line_right) {
         error = -1;
-    } else if (line_right && !line_center && !line_left) {
+    } 
+    else if (line_right && !line_center && !line_left) {
         error = 1;
-    } else if (line_center && !line_left && !line_right) {
+    } 
+    else if (line_center && !line_left && !line_right) {
         error = 0;
-    } else if (line_left && line_center && !line_right) {
+    } 
+    else if (line_left && line_center && !line_right) {
         error = -0.5;
-    } else if (line_right && line_center && !line_left) {
+    } 
+    else if (line_right && line_center && !line_left) {
         error = 0.5;
-    } else {
+    } 
+    else {
         error = 0;  
     }
     
     float correction = pid_calc(error);
     setMotorSpeeds(LINE_FOLLOW_SPEED - correction, LINE_FOLLOW_SPEED + correction);
+}
+
+float pid_calc(float error) {
+    integral += error;
+    float derivative = error - prev_err;
+    prev_err = error;
+    return Kp * error + Ki * integral + Kd * derivative;
 }
 
 void avoidObstacle() {
@@ -350,6 +643,10 @@ void avoidObstacle() {
 }
 
 void setMotorSpeeds(float left, float right) {
+    // Constrain speeds to valid range
+    left = constrain(left, -MAX_SPEED, MAX_SPEED);
+    right = constrain(right, -MAX_SPEED, MAX_SPEED);
+    
     // Set left motor direction and speed
     digitalWrite(LEFT_MOTOR_DIR, left > 0 ? HIGH : LOW);
     analogWrite(LEFT_MOTOR_PWM, abs(left) * 255 / MAX_SPEED);
@@ -357,4 +654,21 @@ void setMotorSpeeds(float left, float right) {
     // Set right motor direction and speed
     digitalWrite(RIGHT_MOTOR_DIR, right > 0 ? HIGH : LOW);
     analogWrite(RIGHT_MOTOR_PWM, abs(right) * 255 / MAX_SPEED);
+}
+
+void printMissionStatus() {
+    Serial.println("\n=== MISSION STATUS ===");
+    if (processing_targets) {
+        Serial.printf("Phase: COLLECTING | Boxes: %d/4\n", boxes_collected);
+    } 
+    else {
+        Serial.printf("Phase: DELIVERING | Boxes: %d/4\n", boxes_delivered);
+    }
+    
+    Serial.printf("Current face: %d | Loaded faces: ", current_face + 1);
+    for (int i = 0; i < 4; i++) {
+        Serial.print(boxes_loaded[i] ? "1 " : "0 ");
+    }
+    Serial.printf("\nCurrent node: %s\n", node_tracking->current_node.c_str());
+    Serial.println("=====================");
 }
