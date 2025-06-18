@@ -2,6 +2,7 @@
 
 TO DO:
 
+**** ADD OBJECT AVOIDANCE **
 ** Add single sided joints (apart from full intersections)
 ** Make "lef" and "right" of line sensors count on two sensors instead of just one (left = s1 + s2, not just s1)
 ** Use Gadiel's code for the mechano wheels
