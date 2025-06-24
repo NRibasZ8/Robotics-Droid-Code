@@ -161,6 +161,30 @@ intersection_cooldown = 0
 intersection_cooldown_steps = 32
 past_intersection = False
 
+# Sensor filters
+line_filter_s1 = MovingAverageFilter(window_size=3)
+line_filter_s2 = MovingAverageFilter(window_size=3)
+line_filter_s3 = MovingAverageFilter(window_size=3)
+line_filter_s4 = MovingAverageFilter(window_size=3)
+line_filter_s5 = MovingAverageFilter(window_size=3)
+tof_filters = [MovingAverageFilter(window_size=5) for _ in range(4)]  # One for each TOF sensor
+
+# ==================== MOVING AVERAGE FILTER CLASS ====================
+class MovingAverageFilter:
+    def __init__(self, window_size=5):
+        self.window_size = window_size
+        self.values = []
+    
+    def add_value(self, value):
+        self.values.append(value)
+        if len(self.values) > self.window_size:
+            self.values.pop(0)
+    
+    def get_average(self):
+        if not self.values:
+            return 0
+        return sum(self.values) / len(self.values)
+
 # ==================== TRACKNODE CLASS DEFINITION ====================
 class TrackNode:
     def __init__(self, graph, start_node, start_direction):
@@ -254,11 +278,25 @@ def loop():
     global integral, prev_err
     
     # ==================== SENSOR READING ====================
-    s1 = not S1.value()
-    s2 = not S2.value()
-    s3 = not S3.value()
-    s4 = not S4.value()
-    s5 = not S5.value()
+    # Read raw sensor values and update filters
+    raw_s1 = not S1.value()
+    raw_s2 = not S2.value()
+    raw_s3 = not S3.value()
+    raw_s4 = not S4.value()
+    raw_s5 = not S5.value()
+    
+    line_filter_s1.add_value(raw_s1)
+    line_filter_s2.add_value(raw_s2)
+    line_filter_s3.add_value(raw_s3)
+    line_filter_s4.add_value(raw_s4)
+    line_filter_s5.add_value(raw_s5)
+    
+    # Get filtered values (threshold at 0.5)
+    s1 = 1 if line_filter_s1.get_average() > 0.5 else 0
+    s2 = 1 if line_filter_s2.get_average() > 0.5 else 0
+    s3 = 1 if line_filter_s3.get_average() > 0.5 else 0
+    s4 = 1 if line_filter_s4.get_average() > 0.5 else 0
+    s5 = 1 if line_filter_s5.get_average() > 0.5 else 0
     
     line_left = s1
     line_center = s3
@@ -592,16 +630,26 @@ def isApproachingTargetBox():
             full_path[current_path_index + 1] == TARGET_NODES[boxes_collected])
 
 def getCurrentFaceTOFDistance():
+    raw_distance = -1
     if current_face == 0:
-        return tof1.readRangeSingleMillimeters()
+        raw_distance = tof1.readRangeSingleMillimeters()
     elif current_face == 1:
-        return tof2.readRangeSingleMillimeters()
+        raw_distance = tof2.readRangeSingleMillimeters()
     elif current_face == 2:
-        return tof3.readRangeSingleMillimeters()
+        raw_distance = tof3.readRangeSingleMillimeters()
     elif current_face == 3:
-        return tof4.readRangeSingleMillimeters()
+        raw_distance = tof4.readRangeSingleMillimeters()
+    
+    # Filter out invalid readings (negative or too large)
+    if raw_distance < 0 or raw_distance > 2000:  # 2000mm max reasonable distance
+        raw_distance = -1
+    
+    # Update and get filtered distance
+    if raw_distance != -1:
+        tof_filters[current_face].add_value(raw_distance)
+        return tof_filters[current_face].get_average()
     return -1
-
+    
 def activateElectromagnet(on):
     if current_face == 0:
         EMAG1.value(on)
